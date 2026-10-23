@@ -30,7 +30,8 @@ const idbSet = async (k, v) => {
       t.objectStore("kv").put(v, k);
       t.oncomplete = res; t.onerror = () => rej(t.error);
     });
-  } catch {}
+    return true;
+  } catch { return false; }
 };
 const idbGet = async (k) => {
   try {
@@ -41,11 +42,20 @@ const idbGet = async (k) => {
     });
   } catch { return undefined; }
 };
-const writeTx = (list) => {
-  try { localStorage.setItem(KEY, JSON.stringify(list)); }
-  catch { alert("ذخیره انجام نشد. فضای مرورگر پر است یا ذخیره‌سازی بسته است."); return false; }
-  idbSet("tx", list);
-  return true;
+const TSKEY = "fin_ts_v1";
+const readLS = () => {
+  try {
+    const l = JSON.parse(localStorage.getItem(KEY));
+    return { list: Array.isArray(l) ? l : [], ts: +localStorage.getItem(TSKEY) || 0 };
+  } catch { return { list: [], ts: 0 }; }
+};
+// در هر دو جا می‌نویسد؛ اگر یکی از آن‌ها شکست خورد، دیگری کافی است
+const writeTx = async (list) => {
+  const ts = Date.now();
+  let ls = false;
+  try { localStorage.setItem(KEY, JSON.stringify(list)); localStorage.setItem(TSKEY, String(ts)); ls = true; } catch {}
+  const db = await idbSet("tx", { ts, list });
+  return ls || db;
 };
 const saveBudget = (v) => { try { localStorage.setItem(BKEY, v); } catch {} idbSet("budget", v); };
 const sortTx = (l) => [...l].sort((a, b) => b.date.localeCompare(a.date) || String(b.id).localeCompare(String(a.id)));
@@ -83,6 +93,9 @@ const weekdayIdx = (s) => (at(s).getDay() + 1) % 7; // شنبه = ۰
 
 /* تقویم شمسی: ذخیره‌سازی میلادی (ISO) می‌ماند و فقط نمایش/انتخاب شمسی است */
 const PMONTHS = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"];
+const toLatin = (s) => String(s)
+  .replace(/[۰-۹]/g, (d) => "۰۱۲۳۴۵۶۷۸۹".indexOf(d))
+  .replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d));
 const faNum = (n) => String(n).replace(/\d/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[d]);
 const PM = new Intl.DateTimeFormat("en-u-ca-persian-nu-latn", { year: "numeric", month: "numeric", day: "numeric", timeZone: "UTC" });
 const utcIso = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -128,6 +141,8 @@ function Dashboard() {
   const [modal, setModal] = useState(null); // null | {} | تراکنش برای ویرایش
   const [budget, setBudget] = useState(30000000);
   const [installEvt, setInstallEvt] = useState(null);
+  const [toast, setToast] = useState("");
+  const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 3000); };
   useEffect(() => {
     const h = (e) => { e.preventDefault(); setInstallEvt(e); };
     window.addEventListener("beforeinstallprompt", h);
@@ -136,13 +151,14 @@ function Dashboard() {
 
   useEffect(() => {
     (async () => {
-      let list = readTx();
+      const ls = readLS();
+      const m = await idbGet("tx");
+      const mi = Array.isArray(m) ? { list: m, ts: 0 } : m && Array.isArray(m.list) ? m : null;
+      let list = ls.list;
+      // نسخه جدیدتر برنده است؛ و اگر یکی خالی بود از دیگری بازیابی می‌شود
+      if (mi && (mi.ts > ls.ts || (!ls.list.length && mi.list.length))) list = mi.list;
       let b = null;
       try { b = localStorage.getItem(BKEY); } catch {}
-      if (!list.length) { // اگر localStorage خالی بود، از نسخه IndexedDB بازیابی کن
-        const m = await idbGet("tx");
-        if (Array.isArray(m) && m.length) { list = m; try { localStorage.setItem(KEY, JSON.stringify(m)); } catch {} }
-      }
       if (!b) {
         const mb = await idbGet("budget");
         if (mb > 0) { b = mb; try { localStorage.setItem(BKEY, mb); } catch {} }
@@ -150,11 +166,14 @@ function Dashboard() {
       setTx(sortTx(list));
       if (b > 0) setBudget(+b);
       setLoading(false);
-      if (list.length) idbSet("tx", list);
+      if (list.length) writeTx(list); // هر دو نسخه را هم‌گام کن
       try { navigator.storage?.persist?.(); } catch {} // جلوگیری از پاک‌شدن خودکار داده توسط مرورگر
     })();
   }, []);
-  const commit = (list) => { if (writeTx(list)) setTx(sortTx(list)); };
+  const commit = (list) => {
+    setTx(sortTx(list)); // بلافاصله نمایش بده، بعد ذخیره کن
+    writeTx(list).then((ok) => { if (!ok) alert("ذخیره‌سازی مرورگر پاسخ نداد! از بخش «پشتیبان‌گیری» یک نسخه بگیرید."); });
+  };
 
   const range = useMemo(() => {
     const p = PERIODS.find((x) => x.k === period);
@@ -164,6 +183,8 @@ function Dashboard() {
     else {
       const min = tx.length ? tx.reduce((a, t) => (t.date < a ? t.date : a), tx[0].date) : iso(end);
       start.setTime(at(min).getTime());
+      const max = tx.reduce((a, t) => (t.date > a ? t.date : a), iso(end));
+      end.setTime(at(max).getTime()); // تراکنش با تاریخ آینده هم دیده شود
     }
     const n = Math.max(1, Math.round((at(iso(end)) - at(iso(start))) / 864e5) + 1);
     return { from: iso(start), to: iso(end), n };
@@ -240,6 +261,10 @@ function Dashboard() {
     const item = { id: data.id || uid(), type: data.type, title: data.title, category: data.category, amount: +data.amount, date: data.date, note: data.note || "" };
     commit(data.id ? tx.map((t) => (t.id === data.id ? item : t)) : [...tx, item]);
     setModal(null);
+    if (period !== "all" && (item.date > range.to || item.date < range.from)) {
+      setPeriod("all");
+      flash("ذخیره شد؛ بازه روی «همه» رفت تا این تراکنش دیده شود");
+    } else flash("ذخیره شد ✓");
   };
   const remove = (id) => {
     if (!confirm("این تراکنش حذف شود؟")) return;
@@ -271,11 +296,8 @@ function Dashboard() {
     rd.readAsText(file);
   };
   const editBudget = () => {
-    const v = prompt("بودجه ماهانه (تومان):", budget);
-    if (v && +v > 0) {
-      setBudget(+v);
-      saveBudget(+v);
-    }
+    const v = +toLatin(prompt("بودجه ماهانه (تومان):", budget) || "").replace(/[,٬،\s]/g, "");
+    if (v > 0) { setBudget(v); saveBudget(v); }
   };
   const exportCsv = () => {
     const rows = [["تاریخ", "نوع", "عنوان", "دسته", "مبلغ", "یادداشت"],
@@ -473,11 +495,17 @@ function Dashboard() {
       </Card>
 
       <footer className="mt-10 pb-6 text-center text-sm text-slate-500">
-        امیرسجاد نوری {" "} - {" "}
+        {" "} امیرسجاد نوری {" "} - 
         <a href="https://nouriverse.vercel.app" target="_blank" rel="noopener noreferrer" dir="ltr" className="transition hover:text-indigo-300">
           nouriverse.vercel.app
         </a>
       </footer>
+
+      {toast && (
+        <div role="status" className="fixed bottom-6 left-1/2 z-[60] -translate-x-1/2 rounded-2xl bg-teal-300 px-5 py-3 text-sm font-bold text-slate-900 shadow-xl">
+          {toast}
+        </div>
+      )}
 
       {modal && <TxModal item={modal} onClose={() => setModal(null)} onSave={save} />}
     </main>
@@ -516,9 +544,14 @@ function TxModal({ item, onClose, onSave }) {
   const [f, setF] = useState({
     type: "expense", title: "", amount: "", category: "خوراک", date: iso(new Date()), note: "", ...item,
   });
-  const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
+  const set = (k, v) => { setF((p) => ({ ...p, [k]: v })); setErr(""); };
   const cats = Object.keys(CATS[f.type]);
-  const valid = f.title.trim() && +f.amount > 0;
+  const [err, setErr] = useState("");
+  const submit = () => {
+    if (!f.title.trim()) return setErr("عنوان را وارد کنید.");
+    if (!(+f.amount > 0)) return setErr("مبلغ را وارد کنید (بزرگ‌تر از صفر).");
+    onSave({ ...f, amount: +f.amount, title: f.title.trim() });
+  };
   const input = "w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2.5 outline-none focus:border-indigo-400";
 
   return (
@@ -539,7 +572,7 @@ function TxModal({ item, onClose, onSave }) {
         <div className="space-y-3">
           <input className={input} placeholder="عنوان (مثلاً ناهار)" value={f.title} onChange={(e) => set("title", e.target.value)} />
           <input className={input} dir="ltr" inputMode="numeric" placeholder="مبلغ (تومان)" value={f.amount}
-            onChange={(e) => set("amount", e.target.value.replace(/\D/g, ""))} />
+            onChange={(e) => set("amount", toLatin(e.target.value).replace(/\D/g, ""))} />
           {+f.amount > 0 && <p className="-mt-1 text-xs text-slate-400">{money(f.amount)} تومان</p>}
           <div className="grid gap-3">
             <select className={input} value={f.category} onChange={(e) => set("category", e.target.value)}>
@@ -550,8 +583,9 @@ function TxModal({ item, onClose, onSave }) {
           <textarea rows={2} className={input} placeholder="یادداشت (اختیاری)" value={f.note} onChange={(e) => set("note", e.target.value)} />
         </div>
 
-        <button disabled={!valid} onClick={() => onSave({ ...f, amount: +f.amount, title: f.title.trim() })}
-          className="mt-5 w-full rounded-2xl bg-indigo-400 py-3 font-extrabold text-slate-900 transition hover:bg-indigo-300 disabled:cursor-not-allowed disabled:opacity-40">
+        {err && <p className="mt-4 rounded-xl bg-rose-400/10 px-3 py-2 text-sm text-rose-200">{err}</p>}
+        <button onClick={submit}
+          className="mt-4 w-full rounded-2xl bg-indigo-400 py-3 font-extrabold text-slate-900 transition hover:bg-indigo-300">
           {f.id ? "ذخیره تغییرات" : "افزودن"}
         </button>
       </div>
