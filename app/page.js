@@ -495,7 +495,7 @@ function Dashboard() {
       </Card>
 
       <footer className="mt-10 pb-6 text-center text-sm text-slate-500">
-        {" "} امیرسجاد نوری {" "} - 
+        {" "} امیرسجاد نوری {" "} - {" "}
         <a href="https://nouriverse.vercel.app" target="_blank" rel="noopener noreferrer" dir="ltr" className="transition hover:text-indigo-300">
           nouriverse.vercel.app
         </a>
