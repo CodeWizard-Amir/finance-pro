@@ -1,4 +1,6 @@
-const CACHE = "finance-v1";
+// توجه: این فایل فقط کش فایل‌های برنامه را مدیریت می‌کند.
+// داده‌های مالی در localStorage و IndexedDB هستند و هیچ‌وقت توسط به‌روزرسانی پاک نمی‌شوند.
+const CACHE = "finance-v2";
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(["/icons/icon-192.png"])).then(() => self.skipWaiting()));
@@ -7,7 +9,7 @@ self.addEventListener("install", (e) => {
 self.addEventListener("activate", (e) => {
   e.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k.startsWith("finance-") && k !== CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });

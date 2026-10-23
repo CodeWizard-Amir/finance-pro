@@ -7,7 +7,7 @@ import {
 import {
   FiPlus, FiTrash2, FiEdit2, FiSearch, FiDownload, FiTrendingUp, FiTrendingDown,
   FiPercent, FiX, FiTarget, FiCalendar, FiCoffee, FiHome, FiTruck, FiHeart, FiFilm,
-  FiBook, FiShoppingBag, FiBriefcase, FiGift, FiMoreHorizontal, FiActivity, FiAlertTriangle, FiUpload,
+  FiBook, FiShoppingBag, FiBriefcase, FiGift, FiMoreHorizontal, FiActivity, FiAlertTriangle, FiUpload, FiChevronLeft, FiChevronRight,
 } from "react-icons/fi";
 import { FaWallet } from "react-icons/fa";
 
@@ -15,10 +15,39 @@ import { FaWallet } from "react-icons/fa";
 // ذخیره‌سازی کاملاً محلی: داده‌ها فقط در مرورگر همین دستگاه می‌مانند
 const KEY = "fin_tx_v1", BKEY = "fin_budget_v1";
 const readTx = () => { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch { return []; } };
-const writeTx = (list) => {
-  try { localStorage.setItem(KEY, JSON.stringify(list)); return true; }
-  catch { alert("ذخیره انجام نشد. فضای مرورگر پر است یا ذخیره‌سازی بسته است."); return false; }
+// نسخه دوم داده‌ها در IndexedDB؛ اگر localStorage پاک شد، از اینجا خودکار برمی‌گردد
+const idb = () => new Promise((res, rej) => {
+  const r = indexedDB.open("finance-db", 1);
+  r.onupgradeneeded = () => r.result.createObjectStore("kv");
+  r.onsuccess = () => res(r.result);
+  r.onerror = () => rej(r.error);
+});
+const idbSet = async (k, v) => {
+  try {
+    const db = await idb();
+    await new Promise((res, rej) => {
+      const t = db.transaction("kv", "readwrite");
+      t.objectStore("kv").put(v, k);
+      t.oncomplete = res; t.onerror = () => rej(t.error);
+    });
+  } catch {}
 };
+const idbGet = async (k) => {
+  try {
+    const db = await idb();
+    return await new Promise((res, rej) => {
+      const q = db.transaction("kv").objectStore("kv").get(k);
+      q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+    });
+  } catch { return undefined; }
+};
+const writeTx = (list) => {
+  try { localStorage.setItem(KEY, JSON.stringify(list)); }
+  catch { alert("ذخیره انجام نشد. فضای مرورگر پر است یا ذخیره‌سازی بسته است."); return false; }
+  idbSet("tx", list);
+  return true;
+};
+const saveBudget = (v) => { try { localStorage.setItem(BKEY, v); } catch {} idbSet("budget", v); };
 const sortTx = (l) => [...l].sort((a, b) => b.date.localeCompare(a.date) || String(b.id).localeCompare(String(a.id)));
 const uid = () => (globalThis.crypto?.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 
@@ -52,6 +81,29 @@ const pDate = (s, o = { day: "numeric", month: "long", year: "numeric" }) =>
   new Intl.DateTimeFormat("fa-IR-u-ca-persian", o).format(at(s));
 const weekdayIdx = (s) => (at(s).getDay() + 1) % 7; // شنبه = ۰
 
+/* تقویم شمسی: ذخیره‌سازی میلادی (ISO) می‌ماند و فقط نمایش/انتخاب شمسی است */
+const PMONTHS = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"];
+const faNum = (n) => String(n).replace(/\d/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[d]);
+const PM = new Intl.DateTimeFormat("en-u-ca-persian-nu-latn", { year: "numeric", month: "numeric", day: "numeric", timeZone: "UTC" });
+const utcIso = (ms) => new Date(ms).toISOString().slice(0, 10);
+const toJ = (s) => {
+  const [Y, M, D] = s.split("-").map(Number);
+  const o = {};
+  PM.formatToParts(new Date(Date.UTC(Y, M - 1, D, 12))).forEach((p) => { if (["year", "month", "day"].includes(p.type)) o[p.type] = +p.value; });
+  return { y: o.year, m: o.month, d: o.day };
+};
+const nowruz = (y) => {
+  let t = Date.UTC(y + 621, 2, 17, 12);
+  for (let i = 0; i < 8; i++, t += 864e5) { const j = toJ(utcIso(t)); if (j.y === y && j.m === 1 && j.d === 1) return t; }
+  return Date.UTC(y + 621, 2, 21, 12);
+};
+const monthLen = (y, m) => (m <= 6 ? 31 : m <= 11 ? 30 : Math.round((nowruz(y + 1) - nowruz(y)) / 864e5) - 336);
+const toG = (y, m, d) => {
+  let off = d - 1;
+  for (let i = 1; i < m; i++) off += i <= 6 ? 31 : 30;
+  return utcIso(nowruz(y) + off * 864e5);
+};
+
 const tip = {
   contentStyle: { background: "#151c33", border: "1px solid #2a3350", borderRadius: 14, color: "#e6e9f5", fontFamily: "inherit" },
   formatter: (v) => money(v) + " تومان",
@@ -83,10 +135,24 @@ function Dashboard() {
   }, []);
 
   useEffect(() => {
-    setTx(sortTx(readTx()));
-    try { const b = localStorage.getItem(BKEY); if (b) setBudget(+b); } catch {}
-    setLoading(false);
-    try { navigator.storage?.persist?.(); } catch {} // جلوگیری از پاک‌شدن خودکار داده توسط مرورگر
+    (async () => {
+      let list = readTx();
+      let b = null;
+      try { b = localStorage.getItem(BKEY); } catch {}
+      if (!list.length) { // اگر localStorage خالی بود، از نسخه IndexedDB بازیابی کن
+        const m = await idbGet("tx");
+        if (Array.isArray(m) && m.length) { list = m; try { localStorage.setItem(KEY, JSON.stringify(m)); } catch {} }
+      }
+      if (!b) {
+        const mb = await idbGet("budget");
+        if (mb > 0) { b = mb; try { localStorage.setItem(BKEY, mb); } catch {} }
+      }
+      setTx(sortTx(list));
+      if (b > 0) setBudget(+b);
+      setLoading(false);
+      if (list.length) idbSet("tx", list);
+      try { navigator.storage?.persist?.(); } catch {} // جلوگیری از پاک‌شدن خودکار داده توسط مرورگر
+    })();
   }, []);
   const commit = (list) => { if (writeTx(list)) setTx(sortTx(list)); };
 
@@ -199,7 +265,7 @@ function Dashboard() {
           .map((t) => ({ ...t, id: t.id || uid(), amount: +t.amount }));
         if (!confirm(`${fa.format(list.length)} تراکنش بازیابی شود؟ داده‌های فعلی جایگزین می‌شوند.`)) return;
         commit(list);
-        if (d.budget > 0) { setBudget(+d.budget); try { localStorage.setItem(BKEY, +d.budget); } catch {} }
+        if (d.budget > 0) { setBudget(+d.budget); saveBudget(+d.budget); }
       } catch { alert("فایل پشتیبان معتبر نیست."); }
     };
     rd.readAsText(file);
@@ -208,12 +274,12 @@ function Dashboard() {
     const v = prompt("بودجه ماهانه (تومان):", budget);
     if (v && +v > 0) {
       setBudget(+v);
-      try { localStorage.setItem(BKEY, +v); } catch {}
+      saveBudget(+v);
     }
   };
   const exportCsv = () => {
     const rows = [["تاریخ", "نوع", "عنوان", "دسته", "مبلغ", "یادداشت"],
-      ...list.map((t) => [t.date, t.type === "income" ? "درآمد" : "هزینه", t.title, t.category, t.amount, t.note || ""])];
+      ...list.map((t) => [pDate(t.date, { year: "numeric", month: "2-digit", day: "2-digit" }), t.type === "income" ? "درآمد" : "هزینه", t.title, t.category, t.amount, t.note || ""])];
     const blob = new Blob(["\uFEFF" + rows.map((r) => r.map((c) => `"${c}"`).join(",")).join("\n")], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "transactions.csv"; a.click();
   };
@@ -406,6 +472,12 @@ function Dashboard() {
         )}
       </Card>
 
+      <footer className="mt-10 pb-6 text-center text-sm text-slate-500">
+        <a href="https://nouriverse.vercel.app" target="_blank" rel="noopener noreferrer" dir="ltr" className="transition hover:text-indigo-300">
+          nouriverse.vercel.app
+        </a>
+      </footer>
+
       {modal && <TxModal item={modal} onClose={() => setModal(null)} onSave={save} />}
     </main>
   );
@@ -468,13 +540,12 @@ function TxModal({ item, onClose, onSave }) {
           <input className={input} dir="ltr" inputMode="numeric" placeholder="مبلغ (تومان)" value={f.amount}
             onChange={(e) => set("amount", e.target.value.replace(/\D/g, ""))} />
           {+f.amount > 0 && <p className="-mt-1 text-xs text-slate-400">{money(f.amount)} تومان</p>}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid gap-3">
             <select className={input} value={f.category} onChange={(e) => set("category", e.target.value)}>
               {cats.map((c) => <option key={c} className="bg-slate-900">{c}</option>)}
             </select>
-            <input type="date" className={input} value={f.date} onChange={(e) => set("date", e.target.value)} />
+            <DatePicker value={f.date} onChange={(v) => set("date", v)} />
           </div>
-          <p className="text-xs text-slate-500">تاریخ شمسی: {f.date && pDate(f.date)}</p>
           <textarea rows={2} className={input} placeholder="یادداشت (اختیاری)" value={f.note} onChange={(e) => set("note", e.target.value)} />
         </div>
 
@@ -483,6 +554,82 @@ function TxModal({ item, onClose, onSave }) {
           {f.id ? "ذخیره تغییرات" : "افزودن"}
         </button>
       </div>
+    </div>
+  );
+}
+
+function DatePicker({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const sel = toJ(value);
+  const today = iso(new Date());
+  const tj = toJ(today);
+  const [view, setView] = useState({ y: sel.y, m: sel.m });
+
+  const toggle = () => { if (!open) setView({ y: sel.y, m: sel.m }); setOpen(!open); };
+  const go = (dm) => setView(({ y, m }) => {
+    let nm = m + dm, ny = y;
+    if (nm > 12) { nm = 1; ny++; }
+    if (nm < 1) { nm = 12; ny--; }
+    return { y: ny, m: nm };
+  });
+  const pick = (d) => { onChange(toG(view.y, view.m, d)); setOpen(false); };
+
+  const lead = (new Date(toG(view.y, view.m, 1) + "T12:00:00Z").getUTCDay() + 1) % 7;
+  const cells = [...Array(lead).fill(null), ...Array.from({ length: monthLen(view.y, view.m) }, (_, i) => i + 1)];
+  const y0 = Math.min(view.y, tj.y - 15), y1 = Math.max(view.y, tj.y + 5);
+  const years = Array.from({ length: y1 - y0 + 1 }, (_, i) => y0 + i);
+  const sm = "rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 text-sm outline-none focus:border-indigo-400";
+
+  return (
+    <div>
+      <button type="button" onClick={toggle}
+        className="flex w-full items-center justify-between gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2.5 text-right outline-none focus:border-indigo-400">
+        <span>{WEEK[weekdayIdx(value)]} {pDate(value)}</span>
+        <FiCalendar className="text-slate-400" />
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10 bg-black/40" onClick={() => setOpen(false)} />
+          <div className="fixed left-1/2 top-1/2 z-20 w-[92vw] max-w-xs -translate-x-1/2 -translate-y-1/2 rounded-3xl border border-white/10 bg-[#171f3d] p-4 shadow-2xl">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <button type="button" aria-label="ماه قبل" onClick={() => go(-1)} className="rounded-lg p-2 hover:bg-white/10"><FiChevronRight /></button>
+              <div className="flex gap-2">
+                <select className={sm} value={view.m} onChange={(e) => setView({ ...view, m: +e.target.value })}>
+                  {PMONTHS.map((n, i) => <option key={n} value={i + 1} className="bg-slate-900">{n}</option>)}
+                </select>
+                <select className={sm} value={view.y} onChange={(e) => setView({ ...view, y: +e.target.value })}>
+                  {years.map((y) => <option key={y} value={y} className="bg-slate-900">{faNum(y)}</option>)}
+                </select>
+              </div>
+              <button type="button" aria-label="ماه بعد" onClick={() => go(1)} className="rounded-lg p-2 hover:bg-white/10"><FiChevronLeft /></button>
+            </div>
+
+            <div className="grid grid-cols-7 gap-1 text-center text-xs text-slate-400">
+              {["ش", "ی", "د", "س", "چ", "پ", "ج"].map((w) => <span key={w} className="py-1">{w}</span>)}
+            </div>
+            <div className="mt-1 grid grid-cols-7 gap-1">
+              {cells.map((d, i) => {
+                if (!d) return <span key={i} />;
+                const isSel = view.y === sel.y && view.m === sel.m && d === sel.d;
+                const isToday = view.y === tj.y && view.m === tj.m && d === tj.d;
+                const friday = (lead + d - 1) % 7 === 6;
+                return (
+                  <button key={i} type="button" onClick={() => pick(d)}
+                    className={`aspect-square rounded-xl text-sm transition ${isSel ? "bg-indigo-400 font-bold text-slate-900" : "hover:bg-white/10"} ${!isSel && isToday ? "ring-1 ring-teal-300" : ""} ${!isSel && friday ? "text-rose-300" : ""}`}>
+                    {faNum(d)}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-3 flex justify-between text-sm">
+              <button type="button" onClick={() => { onChange(today); setOpen(false); }} className="text-indigo-300 hover:underline">امروز</button>
+              <button type="button" onClick={() => setOpen(false)} className="text-slate-400 hover:underline">بستن</button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
